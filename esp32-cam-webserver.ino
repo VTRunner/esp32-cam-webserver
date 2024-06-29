@@ -1,5 +1,8 @@
+// Libraries for DS18B20 to read temperature
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
 #include <esp_camera.h>
-#include <esp_int_wdt.h>
 #include <esp_task_wdt.h>
 #include <WiFi.h>
 #include <DNSServer.h>
@@ -8,7 +11,7 @@
 #include "src/parsebytes.h"
 #include "time.h"
 #include <ESPmDNS.h>
-
+#include "esp_private/periph_ctrl.h"              // Depricated - what is the replacement?
 
 /* This sketch is a extension/expansion/reork of the 'official' ESP32 Camera example
  *  sketch from Expressif:
@@ -105,6 +108,24 @@ extern void serialDump();
     int streamPort = 81;
 #endif
 
+// Temperature sensor definitions
+// If available the data wire is plugged into this pin on the ESP32-cam
+// Defaults to pin 13
+#if defined(DS18B20_ENABLE)
+    bool ds18b20Enable = true;
+#else
+    bool ds18b20Enable = false;
+#endif
+
+#if !defined(DB18B20_PIN)
+    #define DS18B20_PIN 13
+#endif
+
+// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire oneWire(DS18B20_PIN);
+
+// Pass our oneWire reference to Dallas Temperature. 
+DallasTemperature roomTempSensors(&oneWire);
 #if !defined(WIFI_WATCHDOG)
     #define WIFI_WATCHDOG 15000
 #endif
@@ -152,10 +173,23 @@ int sensorPID;
 // Originally: config.xclk_freq_mhz = 20000000, but this lead to visual artifacts on many modules.
 // See https://github.com/espressif/esp32-camera/issues/150#issuecomment-726473652 et al.
 #if !defined (XCLK_FREQ_MHZ)
-    unsigned long xclk = 8;
-#else
-    unsigned long xclk = XCLK_FREQ_MHZ;
+    #define XCLK_FREQ_MHZ 8
 #endif
+unsigned long xclk = XCLK_FREQ_MHZ;
+
+// Night mode
+// can be set in myconfig.h
+#if !defined(NIGHT_MODE)
+  #define NIGHT_MODE 0
+#endif
+bool nightmode = NIGHT_MODE;
+
+// Stream Speed
+// can be set in myconfig.h
+#if !defined(STREAM_SPEED)
+  #define STREAM_SPEED 0
+#endif
+bool streamspeed = STREAM_SPEED;
 
 // initial rotation
 // can be set in myconfig.h
@@ -272,13 +306,37 @@ void setLamp(int newVal) {
     if (newVal != -1) {
         // Apply a logarithmic function to the scale.
         int brightness = round((pow(2,(1+(newVal*0.02)))-2)/6*pwmMax);
-        ledcWrite(lampChannel, brightness);
+        ledcWrite(LAMP_PIN, brightness);
         Serial.print("Lamp: ");
         Serial.print(newVal);
         Serial.print("%, pwm = ");
         Serial.println(brightness);
     }
 #endif
+}
+
+float getRoomTemp() {
+// call roomTempSensors.requestTemperatures() to issue a global temperature 
+  // request to all devices on the bus
+  char * temperatureReturn = (char *) malloc (5); 
+  Serial.print("Requesting temperatures...");
+  roomTempSensors.requestTemperatures(); // Send the command to get temperatures
+  // After we got the temperatures, we can print them here.
+  // We use the function ByIndex, and as an example get the temperature from the first sensor only.
+  float tempC = roomTempSensors.getTempCByIndex(0);
+  float tempF;  // DEVICE_DISCONNECTED_F doesn't match when device read fails, so get in C then convert to F
+  // Check if reading was successful
+  if(tempC != DEVICE_DISCONNECTED_C) 
+  {
+    Serial.print("Temperature for the device 1 (index 0) is: ");
+    Serial.println(tempC);
+  } 
+  else
+  {
+    Serial.println("Error: Could not read temperature data");
+  }
+  tempF = tempC * 1.8 + 32.0;
+  return tempF;
 }
 
 void printLocalTime(bool extraData=false) {
@@ -363,8 +421,19 @@ void StartCamera() {
         critERR = "<h1>Error!</h1><hr><p>Camera module failed to initialise!</p><p>Please reset (power off/on) the camera.</p>";
         critERR += "<p>We will continue to reboot once per minute since this error sometimes clears automatically.</p>";
         // Start a 60 second watchdog timer
-        esp_task_wdt_init(60,true);
-        esp_task_wdt_add(NULL);
+        esp_task_wdt_config_t twdt_config = {
+            .timeout_ms = 60000,
+            .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,    // Bitmask of all cores
+            .trigger_panic = true,
+        };
+        ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&twdt_config));
+        ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+        Serial.print("REBOOT requested");
+        while (true) {
+          flashLED(50);
+          delay(150);
+          Serial.print('.');
+        }
     } else {
         Serial.println("Camera init succeeded");
 
@@ -766,11 +835,10 @@ void setup() {
     // Initialise and set the lamp
     if (lampVal != -1) {
         #if defined(LAMP_PIN)
-            ledcSetup(lampChannel, pwmfreq, pwmresolution);  // configure LED PWM channel
-            ledcAttachPin(LAMP_PIN, lampChannel);            // attach the GPIO pin to the channel
+            ledcAttachChannel(LAMP_PIN, pwmfreq, pwmresolution, lampChannel);  // configure LED PWM channel and attach to the GPIO pin
             if (autoLamp) setLamp(0);                        // set default value
             else setLamp(lampVal);
-         #endif
+        #endif
     } else {
         Serial.println("No lamp, or lamp disabled in config");
     }
@@ -794,6 +862,10 @@ void setup() {
     // Info line; use for Info messages; eg 'This is a Beta!' warnings, etc. as necesscary
     // Serial.print("\r\nThis is the 4.1 beta\r\n");
 
+    // Start up the DS18B20 sensors if flag is enabled
+    if (ds18b20Enable) {
+        roomTempSensors.begin();
+    }
     // As a final init step chomp out the serial buffer in case we have recieved mis-keys or garbage during startup
     while (Serial.available()) Serial.read();
 }

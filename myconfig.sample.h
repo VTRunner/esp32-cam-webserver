@@ -126,6 +126,19 @@ struct station stationList[] = {{"ssid1", "pass1", true},
 //#define NTPSERVER "<EDIT THIS>.pool.ntp.org"
 //#define NTP_GMT_OFFSET 3600
 //#define NTP_DST_OFFSET 3600
+/*
+ *  DS18B20 Temperature Sensor;
+ *
+ *  Uncomment to enable DS18B20 Temperature Sensor;
+ *
+ */
+//#define DS18B20_ENABLE
+
+/*
+*  Override the default pin where the DS18B20 sensor is connected, default pin 13
+*
+*/
+// #define DB18B20_PIN 2
 
 /*
  * Camera Defaults
@@ -141,6 +154,11 @@ struct station stationList[] = {{"ssid1", "pass1", true},
 // Hardware Vertical Flip , 0 or 1 (overrides default board setting)
 // #define V_FLIP 1
 
+// Night Mode, true or false, default false
+// #define NIGHT_MODE true
+
+// Stream Speed, true or false, default true
+// #define STREAM_SPEED true
 // Browser Rotation (one of: -90,0,90, default 0)
 // #define CAM_ROTATION 0
 

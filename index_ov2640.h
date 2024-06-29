@@ -81,6 +81,20 @@ const uint8_t index_ov2640_html[] = R"=====(<!doctype html>
                     <div class="range-max">MHz</div>
                   </div>
               </div>
+              <div class="input-group" id="nightmode-group">
+                <label for="nightmode">NightMode Off/On</label>
+                <div class="switch">
+                  <input id="nightmode" type="checkbox" class="default-action">
+                  <label class="slider" for="nightmode"></label>
+                </div>
+              </div>
+              <div class="input-group" id="streamspeed-group">
+                <label for="streamspeed">Streamspeed (slow/full)</label>
+                <div class="switch">
+                  <input id="streamspeed" type="checkbox" class="default-action">
+                  <label class="slider" for="streamspeed"></label>
+                </div>
+              </div>           					  
               <div class="input-group" id="brightness-group">
                 <label for="brightness">Brightness</label>
                 <div class="range-min">-2</div>
@@ -319,6 +333,8 @@ const uint8_t index_ov2640_html[] = R"=====(<!doctype html>
     const clearPrefsButton = document.getElementById('clear_prefs')
     const rebootButton = document.getElementById('reboot')
     const minFrameTime = document.getElementById('min_frame_time')
+    const night = document.getElementById('nightmode')
+    const strspd = document.getElementById('streamspeed')
 
     const hide = el => {
       el.classList.add('hidden')
@@ -413,6 +429,11 @@ const uint8_t index_ov2640_html[] = R"=====(<!doctype html>
       }
     }
 
+    function setNightMode () {
+      updateValue(strspd, 1, false)
+      updateConfig(strspd);
+      updateConfig(night);
+    }
     function updateConfig (el) {
       let value
       switch (el.type) {
@@ -462,6 +483,8 @@ const uint8_t index_ov2640_html[] = R"=====(<!doctype html>
         hide(waitSettings);
         show(settings);
         show(streamButton);
+
+        setNightMode();
         //startStream();
       })
 
@@ -597,6 +620,11 @@ const uint8_t index_ov2640_html[] = R"=====(<!doctype html>
       updateConfig(xclk)
     }
 
+    // Night
+    night.onchange = () => {
+      setNightMode();      
+    }
+	
     swapButton.onclick = () => {
       window.open('/?view=simple','_self');
     }

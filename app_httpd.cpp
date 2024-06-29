@@ -15,11 +15,9 @@
 #include <esp_http_server.h>
 #include <esp_timer.h>
 #include <esp_camera.h>
-#include <esp_int_wdt.h>
 #include <esp_task_wdt.h>
 #include <Arduino.h>
 #include <WiFi.h>
-
 #include "index_ov2640.h"
 #include "index_ov3660.h"
 #include "index_other.h"
@@ -27,11 +25,13 @@
 #include "src/favicons.h"
 #include "src/logo.h"
 #include "storage.h"
+#include "esp_private/periph_ctrl.h"    // Depricated - what is the replacement?
 
 // Functions from the main .ino
 extern void flashLED(int flashtime);
 extern void setLamp(int newVal);
 extern void printLocalTime(bool extraData);
+extern float getRoomTemp();
 
 // External variables declared in the main .ino
 extern char myName[];
@@ -51,6 +51,8 @@ extern char default_index[];
 extern int8_t streamCount;
 extern unsigned long streamsServed;
 extern unsigned long imagesServed;
+extern bool nightmode;
+extern bool streamspeed;
 extern int myRotation;
 extern int minFrameTime;
 extern int lampVal;
@@ -62,10 +64,12 @@ extern bool haveTime;
 extern int sketchSize;
 extern int sketchSpace;
 extern String sketchMD5;
+extern bool ds18b20Enable;
 extern bool otaEnabled;
 extern char otaPassword[];
 extern unsigned long xclk;
 extern int sensorPID;
+extern camera_config_t config;
 
 typedef struct {
         httpd_req_t *req;
@@ -172,6 +176,44 @@ void serialDump() {
     }
     Serial.println();
     return;
+}
+
+void stream_speed(int full) {
+  sensor_t *s = esp_camera_sensor_get();  // get the cameras function list
+  if (full)  // set full speed=max possible at current setting=default reset setting
+  {
+    s->set_reg(s, 0x111, 0x3f, 0x00);  //about 25 fps at 640*480. set divider to 1
+    streamspeed = true;
+  } else {
+    s->set_reg(s, 0x111, 0x3f, 0x02);  //about 10 fps at 640*480. set divider to 2
+    streamspeed = false;
+  }
+}
+
+void night_mode(int on) {
+  sensor_t *s = esp_camera_sensor_get();  // get the cameras function list
+  s->set_reg(s, 0x111, 0xff, 0x00);       // first switch to full speed clock
+  streamspeed = true;
+  vTaskDelay(200 / portTICK_PERIOD_MS);
+						
+	 
+
+  if (on)  //turn nightmode on
+  {
+    s->set_reg(s, 0x10f, 0xff, 0x4b);  //undocumented register!! enable extended exposuretimes by inserting dummyframes and lines.
+    s->set_reg(s, 0x103, 0xff, 0xcf);  //COM1, allow upto 7 dummyframes, allow additional lines being inserted at start/End of frame
+    nightmode = true;
+    Serial.println("Nightmode on");  // debug
+  } else                             //turn off, is abit complicated
+  {
+    s->set_reg(s, 0x103, 0xff, 0x0a);  //COM1, only allow aditional lines at start of frame
+    s->set_reg(s, 0x10f, 0xff, 0x43);
+    s->set_reg(s, 0x10f, 0xff, 0x4b);       //changes are taken at rising edge bit 3
+    vTaskDelay(1000 / portTICK_PERIOD_MS);  //it needs some settle time
+    s->set_reg(s, 0x10f, 0xff, 0x43);
+    nightmode = false;
+    Serial.println("Nightmode off");  // debug
+  }
 }
 
 static esp_err_t capture_handler(httpd_req_t *req){
@@ -364,6 +406,8 @@ static esp_err_t cmd_handler(httpd_req_t *req){
     }
     else if(!strcmp(variable, "quality")) res = s->set_quality(s, val);
     else if(!strcmp(variable, "xclk")) { xclk = val; res = s->set_xclk(s, LEDC_TIMER_0, val); }
+    else if(!strcmp(variable, "nightmode")) night_mode(val);
+    else if(!strcmp(variable, "streamspeed")) stream_speed(val);
     else if(!strcmp(variable, "contrast")) res = s->set_contrast(s, val);
     else if(!strcmp(variable, "brightness")) res = s->set_brightness(s, val);
     else if(!strcmp(variable, "saturation")) res = s->set_saturation(s, val);
@@ -414,8 +458,13 @@ static esp_err_t cmd_handler(httpd_req_t *req){
     }
     else if(!strcmp(variable, "reboot")) {
         if (lampVal != -1) setLamp(0); // kill the lamp; otherwise it can remain on during the soft-reboot
-        esp_task_wdt_init(3,true);  // schedule a a watchdog panic event for 3 seconds in the future
-        esp_task_wdt_add(NULL);
+        esp_task_wdt_config_t twdt_config = {
+          .timeout_ms = 3000,
+          .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,    // Bitmask of all cores
+          .trigger_panic = true,
+        };
+        ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&twdt_config));  // schedule a a watchdog panic event for 3 seconds in the future
+        ESP_ERROR_CHECK(esp_task_wdt_add(NULL));        periph_module_disable(PERIPH_I2C0_MODULE); // try to shut I2C down properly
         periph_module_disable(PERIPH_I2C0_MODULE); // try to shut I2C down properly
         periph_module_disable(PERIPH_I2C1_MODULE);
         periph_module_reset(PERIPH_I2C0_MODULE);
@@ -435,6 +484,34 @@ static esp_err_t cmd_handler(httpd_req_t *req){
     }
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, NULL, 0);
+}
+
+static esp_err_t roomtemp_handler(httpd_req_t *req) {
+  static char dumpOut[2000] = "";
+  char *d = dumpOut;
+  d += sprintf(d, "<!DOCTYPE html><html><style>*{ Color : #fff;Background : #000;}p {text-align: center;font-size:12px;}</style><body><p>");
+  d += sprintf(d, "%s", myName);
+  d += sprintf(d, "<br>Temp is ");
+  char printTemp[6];
+  float roomTemp = getRoomTemp();  // Call function to get the room temperature
+  dtostrf(roomTemp, 4, 1, printTemp);
+  d += sprintf(d, printTemp);
+  if (haveTime) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      char timeStringBuff[50];  //50 chars should be enough
+      strftime(timeStringBuff, sizeof(timeStringBuff), "%H:%M:%S, %A, %B %d %Y", &timeinfo);
+      //print like "const char*"
+      d += sprintf(d, "F at %s\n", timeStringBuff);
+    }
+  }
+  d += sprintf(d, "</p></body>");
+  d += sprintf(d, "<script>\nsetTimeout(function(){\nlocation.replace(document.URL);\n}, 60000);\n");
+  d += sprintf(d, "</script>\n</html>\n");
+  *d++ = 0;
+  httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Content-Encoding", "identity");
+  return httpd_resp_send(req, dumpOut, strlen(dumpOut));
 }
 
 static esp_err_t status_handler(httpd_req_t *req){
@@ -472,6 +549,8 @@ static esp_err_t status_handler(httpd_req_t *req){
         p+=sprintf(p, "\"vflip\":%u,", s->status.vflip);
         p+=sprintf(p, "\"hmirror\":%u,", s->status.hmirror);
         p+=sprintf(p, "\"dcw\":%u,", s->status.dcw);
+        p += sprintf(p, "\"nightmode\":%u,", nightmode);
+        p += sprintf(p, "\"streamspeed\":%u,", streamspeed);
         p+=sprintf(p, "\"colorbar\":%u,", s->status.colorbar);
         p+=sprintf(p, "\"cam_name\":\"%s\",", myName);
         p+=sprintf(p, "\"code_ver\":\"%s\",", myVer);
@@ -753,6 +832,12 @@ void startCameraServer(int hPort, int sPort){
         .handler   = index_handler,
         .user_ctx  = NULL
     };
+    httpd_uri_t roomtemp_uri = {
+        .uri = "/roomtemp",
+        .method = HTTP_GET,
+        .handler = roomtemp_handler,
+        .user_ctx = NULL
+    };
     httpd_uri_t status_uri = {
         .uri       = "/status",
         .method    = HTTP_GET,
@@ -854,6 +939,9 @@ void startCameraServer(int hPort, int sPort){
         } else {
             httpd_register_uri_handler(camera_httpd, &index_uri);
             httpd_register_uri_handler(camera_httpd, &cmd_uri);
+            if (ds18b20Enable) {
+				      httpd_register_uri_handler(camera_httpd, &roomtemp_uri);
+			      }
             httpd_register_uri_handler(camera_httpd, &status_uri);
             httpd_register_uri_handler(camera_httpd, &capture_uri);
         }
